@@ -3,6 +3,7 @@ import numpy as np
 import mediapipe as mp
 import math
 import collections
+from HandTrackingModule import HandDetector
 
 # ==========================================
 # 1. HEURISTIC SHAPE VALIDATOR
@@ -165,9 +166,7 @@ class App:
         self.cap.set(4, self.height)
 
         # Components
-        self.mpHands = mp.solutions.hands
-        self.hands = self.mpHands.Hands(max_num_hands=1, min_detection_confidence=0.7)
-        self.mpDraw = mp.solutions.drawing_utils
+        self.detector = HandDetector(detectionCon=0.8, maxHands=1)
         
         self.wheel = AlphabetWheel(pos=(200, 200), radius=120)
         self.validator = ShapeValidator()
@@ -195,30 +194,22 @@ class App:
             img = cv2.flip(img, 1)
 
             # 1. Processing (Hand Tracking)
-            imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            results = self.hands.process(imgRGB)
+            # 1. Processing (Hand Tracking)
+            img = self.detector.findHands(img)
+            lmList = self.detector.findPosition(img, draw=False)
             
             x1, y1 = 0, 0
             fingers = []
             hand_detected = False
             
-            if results.multi_hand_landmarks:
+            if len(lmList) != 0:
                 hand_detected = True
                 self.last_hand_time = time.time() # Update valid time
                 
-                for handLms in results.multi_hand_landmarks:
-                    # Parse Landmarks
-                    lmList = []
-                    h, w, c = img.shape
-                    for id, lm in enumerate(handLms.landmark):
-                        cx, cy = int(lm.x * w), int(lm.y * h)
-                        lmList.append([id, cx, cy])
-                    
-                    if lmList:
-                        # Index Tip
-                        x1, y1 = lmList[8][1:]
-                        # Fingers Up Check
-                        fingers = self.check_fingers(lmList)
+                # Index Tip
+                x1, y1 = lmList[8][1], lmList[8][2]
+                # Fingers Up Check
+                fingers = self.detector.fingersUp()
 
             # 2. Logic Update
             
@@ -303,11 +294,7 @@ class App:
             self.wheel.draw(img)
             
             # Landmarks
-            if results.multi_hand_landmarks:
-                for handLms in results.multi_hand_landmarks:
-                     self.mpDraw.draw_landmarks(img, handLms, self.mpHands.HAND_CONNECTIONS,
-                                           self.mpDraw.DrawingSpec(color=(255, 255, 255), thickness=1),
-                                           self.mpDraw.DrawingSpec(color=(0, 255, 255), thickness=4))
+            # Landmarks (Handled by findHands)
 
             # Strokes (Polylines for smoothness)
             # Draw Finished Strokes
@@ -339,16 +326,7 @@ class App:
         self.cap.release()
         cv2.destroyAllWindows()
 
-    def check_fingers(self, lmList):
-        # ... Reuse logic ...
-        fingers = []
-        if lmList[4][0] < lmList[3][0]: fingers.append(1)
-        else: fingers.append(0)
-        tips = [8, 12, 16, 20]
-        for id in tips:
-            if lmList[id][2] < lmList[id-2][2]: fingers.append(1)
-            else: fingers.append(0)
-        return fingers
+
 
 if __name__ == "__main__":
     app = App()
