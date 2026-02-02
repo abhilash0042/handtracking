@@ -4,10 +4,48 @@ import mediapipe as mp
 import math
 import collections
 from HandTrackingModule import HandDetector
+import random
 
 # ==========================================
-# 1. HEURISTIC SHAPE VALIDATOR
+# 0. PARTICLE SYSTEM
 # ==========================================
+class Particle:
+    def __init__(self, x, y, color):
+        self.x = x
+        self.y = y
+        self.color = color
+        self.vx = random.uniform(-2, 2)
+        self.vy = random.uniform(-2, 2)
+        self.alpha = 255
+        self.size = random.randint(2, 6)
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.alpha -= 8 # Fade speed
+        self.size -= 0.1
+
+    def draw(self, img):
+        if self.alpha > 0 and self.size > 0:
+            overlay = img.copy()
+            cv2.circle(overlay, (int(self.x), int(self.y)), int(self.size), self.color, -1)
+            cv2.addWeighted(overlay, self.alpha/255.0, img, 1 - self.alpha/255.0, 0, img)
+
+class ParticleSystem:
+    def __init__(self):
+        self.particles = []
+
+    def emit(self, x, y, color):
+        for _ in range(2): # Emit 2 particles per frame
+            self.particles.append(Particle(x, y, color))
+
+    def update_and_draw(self, img):
+        for p in self.particles[:]:
+            p.update()
+            if p.alpha <= 0 or p.size <= 0:
+                self.particles.remove(p)
+            else:
+                p.draw(img)
 class ShapeValidator:
     def __init__(self):
         self.ref_size = (100, 100)
@@ -167,6 +205,7 @@ class App:
 
         # Components
         self.detector = HandDetector(detectionCon=0.8, maxHands=1)
+        self.particles = ParticleSystem()
         
         self.wheel = AlphabetWheel(pos=(200, 200), radius=120)
         self.validator = ShapeValidator()
@@ -175,9 +214,13 @@ class App:
         self.sm_x, self.sm_y = 0, 0 # Smooth coords
         self.alpha = 0.3 # Smoothing factor (Lower = Smoother)
         
+        self.hue = 0 # For rainbow color
+        
         self.drawing = False
-        self.strokes = [] # List of finished stroke paths [ [(x,y),...], [(x,y),...] ]
+        self.strokes = [] # List of finished stroke paths [ (color, points), ... ]
         self.current_stroke = [] # Active stroke
+        self.current_color = (255, 255, 255)
+
         
         self.validation_result = ("?", 0.0, "Ready", (200, 200, 200))
         self.termination_counters = 0
@@ -240,8 +283,18 @@ class App:
                 # DRAW (Index only)
                 if fingers[1] and not fingers[2] and not fingers[3]:
                     self.drawing = True # User is intentionally drawing
+                    
+                    # Update Color (Rainbow Cycle)
+                    self.hue = (self.hue + 2) % 180
+                    # Convert HSV to BGR for OpenCV
+                    hw_color = np.uint8([[[self.hue, 255, 255]]])
+                    bgr_color = cv2.cvtColor(hw_color, cv2.COLOR_HSV2BGR)[0][0]
+                    self.current_color = (int(bgr_color[0]), int(bgr_color[1]), int(bgr_color[2]))
+
                     if draw_point:
                         self.current_stroke.append(draw_point)
+                        # Emit Particles
+                        self.particles.emit(draw_point[0], draw_point[1], self.current_color)
                 
                 # STOP / VALIDATE (Index Down)
                 # Ensure we only stop if we were actually drawing and we explicitly lower fingers
@@ -250,11 +303,11 @@ class App:
                     if self.current_stroke:
                         # Only finalize if it has significant length to avoid dots
                         if len(self.current_stroke) > 2:
-                            self.strokes.append(list(self.current_stroke))
+                            self.strokes.append((self.current_color, list(self.current_stroke)))
                             # Validate
                             # Create a temp canvas for OCR
                             temp_canvas = np.zeros((self.height, self.width, 3), np.uint8)
-                            for s in self.strokes:
+                            for col, s in self.strokes:
                                 if len(s) > 1: cv2.polylines(temp_canvas, [np.array(s)], False, (255,255,255), 15)
                             
                             score, details = self.validator.validate(temp_canvas, target_char, len(self.strokes))
@@ -267,6 +320,10 @@ class App:
                     
                 # CLEAR (Open Palm)
                 if all(fingers[1:]):
+                     if self.strokes:
+                         # Explosion effect
+                         for _ in range(50):
+                             self.particles.emit(self.width//2, self.height//2, (random.randint(0,255), random.randint(0,255), random.randint(0,255)))
                      self.strokes = []
                      self.current_stroke = []
                      self.validation_result = ("?", 0.0, "Ready", (200, 200, 200))
@@ -279,7 +336,7 @@ class App:
                     # Timeout exceeded, commit stroke
                     self.drawing = False
                     if self.current_stroke:
-                         self.strokes.append(list(self.current_stroke))
+                         self.strokes.append((self.current_color, list(self.current_stroke)))
                     self.current_stroke = []
 
 
@@ -298,17 +355,20 @@ class App:
 
             # Strokes (Polylines for smoothness)
             # Draw Finished Strokes
-            for s in self.strokes:
+            for col, s in self.strokes:
                 if len(s) > 1:
-                    # White core
-                    cv2.polylines(img, [np.array(s)], False, (255, 255, 255), 15, cv2.LINE_AA)
-                    # Neon Glow (Cyan) - Simple outline effect
-                    cv2.polylines(img, [np.array(s)], False, (255, 255, 0), 19, cv2.LINE_AA)
+                    # Color core
+                    cv2.polylines(img, [np.array(s)], False, col, 15, cv2.LINE_AA)
+                    # White Glow outline
+                    cv2.polylines(img, [np.array(s)], False, (255, 255, 255), 4, cv2.LINE_AA)
             
             # Draw Current Stroke
             if len(self.current_stroke) > 1:
-                cv2.polylines(img, [np.array(self.current_stroke)], False, (255, 255, 255), 15, cv2.LINE_AA)
-                cv2.polylines(img, [np.array(self.current_stroke)], False, (255, 0, 255), 19, cv2.LINE_AA) # Magenta Glow for active
+                cv2.polylines(img, [np.array(self.current_stroke)], False, self.current_color, 15, cv2.LINE_AA)
+                cv2.polylines(img, [np.array(self.current_stroke)], False, (255, 255, 255), 4, cv2.LINE_AA) # White Glow
+
+            # Draw Particles
+            self.particles.update_and_draw(img)
 
             
             # Text UI
