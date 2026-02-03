@@ -46,73 +46,71 @@ class ParticleSystem:
                 self.particles.remove(p)
             else:
                 p.draw(img)
+# ==========================================
+# 1. ROBUST SHAPE VALIDATOR (IoU Based)
+# ==========================================
 class ShapeValidator:
     def __init__(self):
-        self.ref_size = (100, 100)
+        self.ref_size = (64, 64) # Smaller size for fuzziness logic
 
-    def generate_reference_shape(self, char):
-        """Generates a binary mask of the target char for shape comparison."""
-        img = np.zeros(self.ref_size, dtype=np.uint8)
-        # Center the text
+    def preprocess(self, img_bin):
+        """Centers and resizes content to ref_size"""
+        coords = cv2.findNonZero(img_bin)
+        if coords is None: return None
+        x, y, w, h = cv2.boundingRect(coords)
+        
+        # Crop
+        roi = img_bin[y:y+h, x:x+w]
+        
+        # Resize to fit in ref_size with padding (preserve Aspect Ratio)
+        target_h, target_w = self.ref_size
+        scale = min(target_w/w, target_h/h)
+        new_w, new_h = int(w*scale), int(h*scale)
+        if new_w <= 0 or new_h <= 0: return None
+        
+        resized = cv2.resize(roi, (new_w, new_h))
+        
+        # Place in center of canvas
+        canvas = np.zeros(self.ref_size, dtype=np.uint8)
+        off_x = (target_w - new_w) // 2
+        off_y = (target_h - new_h) // 2
+        
+        canvas[off_y:off_y+new_h, off_x:off_x+new_w] = resized
+        return canvas
+
+    def generate_reference(self, char):
+        img = np.zeros((200, 200), dtype=np.uint8)
         font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 3
-        thickness = 5
-        (w, h), _ = cv2.getTextSize(char, font, scale, thickness)
-        x = (self.ref_size[0] - w) // 2
-        y = (self.ref_size[1] + h) // 2
-        cv2.putText(img, char, (x, y), font, scale, 255, thickness)
-        return img
+        # Draw large to get good resolution then shrink
+        cv2.putText(img, char, (50, 150), font, 5, 255, 10)
+        return self.preprocess(img)
 
     def validate(self, drawing_img, target_char, stroke_count):
-        """
-        Validates the drawing against the target character using heuristics:
-        1. Shape Matching (Hu Moments)
-        2. Aspect Ratio (Bounding Box)
-        3. Stroke Count (Loose check)
-        """
-        if drawing_img is None: return 0.0, "Empty"
-
         # 1. Preprocess Drawing
         gray = cv2.cvtColor(drawing_img, cv2.COLOR_BGR2GRAY)
-        coords = cv2.findNonZero(gray)
-        if coords is None: return 0.0, "Empty"
+        _, bin_img = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY)
         
-        # Bounding Box
-        x, y, w, h = cv2.boundingRect(coords)
-        if w < 10 or h < 10: return 0.0, "Too Small"
-        
-        # Extract ROI and Resize
-        roi = gray[y:y+h, x:x+w]
-        roi = cv2.resize(roi, self.ref_size)
-        _, roi_bin = cv2.threshold(roi, 50, 255, cv2.THRESH_BINARY)
+        processed_draw = self.preprocess(bin_img)
+        if processed_draw is None: return 0.0, "Empty"
 
-        # 2. Get Reference
-        ref_img = self.generate_reference_shape(target_char)
+        # 2. Generate Reference
+        processed_ref = self.generate_reference(target_char)
+        if processed_ref is None: return 0.0, "Error"
         
-        # 3. Shape Matching (Hu Moments)
-        # matchShapes returns a metric where lower is better (0 = perfect match)
-        # We define score = 1 / (1 + distance)
-        dist = cv2.matchShapes(roi_bin, ref_img, cv2.CONTOURS_MATCH_I1, 0)
-        shape_score = 1.0 / (1.0 + dist) # 0 to 1
-
-        # 4. Aspect Ratio Check
-        user_ratio = w / h
-        # Get ref ratio
-        ref_coords = cv2.findNonZero(ref_img)
-        rx, ry, rw, rh = cv2.boundingRect(ref_coords)
-        ref_ratio = rw / rh
+        # 3. IoU Calculation (Pixel Overlap)
+        # Dilate drawing slightly to be forgiving
+        kernel = np.ones((3,3), np.uint8)
+        processed_draw = cv2.dilate(processed_draw, kernel, iterations=1)
         
-        ratio_diff = abs(user_ratio - ref_ratio)
-        ratio_score = max(0, 1.0 - ratio_diff) # Simple linear penalty
+        intersection = np.logical_and(processed_draw, processed_ref)
+        union = np.logical_or(processed_draw, processed_ref)
         
-        # 5. Combined Score
-        # Weight shape more than ratio
-        final_score = (shape_score * 0.7) + (ratio_score * 0.3)
+        iou_score = np.sum(intersection) / np.sum(union)
         
-        # Debug info
-        details = f"Shape:{shape_score:.2f} Ratio:{ratio_score:.2f} Strokes:{stroke_count}"
+        # Boost score slightly since humans aren't printers
+        final_score = min(1.0, iou_score * 1.5) 
         
-        return final_score, details
+        return final_score, f"IoU: {iou_score:.2f}"
 
 # ==========================================
 # 2. ALPHABET WHEEL UI
